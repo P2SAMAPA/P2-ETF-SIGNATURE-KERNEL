@@ -6,8 +6,14 @@ on:
   workflow_dispatch:
 
 jobs:
-  run:
+  # ── One job per window, all run in parallel ──────────────────────────────────
+  train:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        window: [63, 126, 252, 504]
+      fail-fast: false      # other windows keep running if one fails
+
     steps:
       - uses: actions/checkout@v3
 
@@ -18,7 +24,43 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run trainer
+      - name: Run window ${{ matrix.window }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python trainer.py
+        run: python trainer.py --window ${{ matrix.window }}
+
+      # Upload the shard so the merge job can download it
+      - name: Upload shard
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.window }}
+          path: shards/shard_${{ matrix.window }}.json
+          retention-days: 1
+
+  # ── Merge job runs after all windows complete ────────────────────────────────
+  merge:
+    runs-on: ubuntu-latest
+    needs: train           # waits for all matrix jobs to finish
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Download all shards from the parallel train jobs
+      - name: Download all shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          path: shards
+          merge-multiple: true
+
+      - name: Merge shards and upload to HuggingFace
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python trainer.py --merge
